@@ -50,3 +50,39 @@ export async function bestEffortRemove(framer: Framer, nodeId: string): Promise<
     // ignore — rollback is best-effort; the original error is what the caller surfaces
   }
 }
+
+/**
+ * After a create/add operation that accepts a `parentId`, confirm the new node
+ * actually landed under that parent. If Framer ignored `parentId` (common:
+ * node lands under the currently-selected page's primary breakpoint instead),
+ * attempt a corrective `setParent` and verify again. If both fail, the orphan
+ * is best-effort removed and an actionable error is raised.
+ */
+export async function ensureLandedUnder(
+  framer: Framer,
+  newId: string,
+  parentId: string,
+  operation: string,
+  opts: { rollbackOnFailure?: boolean } = {},
+): Promise<void> {
+  const current = await framer.getParent(newId).catch(() => null);
+  const currentId = current ? (current as { id?: string }).id : null;
+  if (currentId === parentId) return;
+
+  try {
+    await framer.setParent(newId, parentId);
+    await assertParent(framer, newId, parentId, `${operation} (after corrective setParent)`);
+    return;
+  } catch (e) {
+    if (opts.rollbackOnFailure) await bestEffortRemove(framer, newId);
+    if (e instanceof FramerToolError) throw e;
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new FramerToolError(
+      `${operation} created ${newId} but it landed under ${currentId ?? "null"} instead of ${parentId}; the corrective move failed: ${msg}${
+        opts.rollbackOnFailure ? ". The node has been removed to restore state." : ""
+      }`,
+      "Verify parentId exists on the same page. If you fired multiple writes in parallel, retry sequentially — Framer's selection context drifts between concurrent writes.",
+      "WRONG_PARENT",
+    );
+  }
+}

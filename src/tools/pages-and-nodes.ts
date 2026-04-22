@@ -1,11 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isTextNode } from "framer-api";
 import { z } from "zod";
-import { FramerToolError, withFramer } from "../framer-client.js";
+import { FramerToolError, withFramerWrite } from "../framer-client.js";
 import { ok } from "../formatters.js";
 import { serializeNode } from "../node-serialize.js";
 import { LooseAttributes, NodeId } from "../schemas.js";
-import { assertParent, assertRemoved, bestEffortRemove } from "../verify.js";
+import { assertRemoved, bestEffortRemove, ensureLandedUnder } from "../verify.js";
 import { registerTool } from "./register.js";
 
 const mutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
@@ -27,7 +27,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     }),
     annotations: mutation,
     handler: async ({ pagePath }) => {
-      const page = await withFramer((f) => f.createWebPage(pagePath));
+      const page = await withFramerWrite((f) => f.createWebPage(pagePath));
       return ok({ page: serializeNode(page) }, `Created web page at ${pagePath}`);
     },
   });
@@ -39,7 +39,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     inputSchema: z.object({ pageName: z.string().min(1) }),
     annotations: mutation,
     handler: async ({ pageName }) => {
-      const page = await withFramer((f) => f.createDesignPage(pageName));
+      const page = await withFramerWrite((f) => f.createDesignPage(pageName));
       return ok({ page: serializeNode(page) }, `Created design page "${pageName}"`);
     },
   });
@@ -53,18 +53,26 @@ export function registerPageAndNodeTools(server: McpServer) {
       "ATTRIBUTE VALUE FORMAT: dimensions must be CSS-unit strings, not bare numbers. " +
       "Use `width: '1440px'` not `width: 1440` — bare numbers are silently coerced to 100. " +
       "Same for `height`, `borderRadius`, `padding`, `gap`, etc. Colors should be hex or rgb() strings. " +
-      "LIMITATION: some attributes (e.g. `position: 'sticky'`, certain nested layout controls) may be rejected or coerced at creation time and require a follow-up framer_set_node_attributes call to take effect.",
+      "LIMITATIONS: " +
+      "(1) Framer may place the new frame under its 'currently selected' context (often the home page's primary breakpoint) rather than the requested parentId. This tool verifies landing and attempts a corrective setParent — if that also fails, the orphan is removed and WRONG_PARENT is raised. " +
+      "(2) Parallel create_* calls in the same turn can race on Framer's selection state. This MCP serializes writes via a process-wide mutex, so firing multiple creates in parallel is SAFE — they will be applied one at a time. " +
+      "(3) Some attributes (`position: 'sticky'`, certain nested layout controls) may be rejected or coerced at creation and require a follow-up framer_set_node_attributes call.",
     inputSchema: z.object({
       attributes: LooseAttributes,
       parentId: NodeId.optional(),
     }),
     annotations: mutation,
     handler: async ({ attributes, parentId }) => {
-      const node = await withFramer((f) =>
+      const node = await withFramerWrite(async (f) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        f.createFrameNode(attributes as any, parentId),
-      );
-      if (!node) throw new FramerToolError("Framer did not return a created frame node.");
+        const n = await f.createFrameNode(attributes as any, parentId);
+        if (!n) throw new FramerToolError("Framer did not return a created frame node.");
+        const newId = (n as { id?: string }).id;
+        if (parentId && newId) {
+          await ensureLandedUnder(f, newId, parentId, "create_frame", { rollbackOnFailure: true });
+        }
+        return newId ? ((await f.getNode(newId)) ?? n) : n;
+      });
       return ok({ node: serializeNode(node) });
     },
   });
@@ -73,7 +81,10 @@ export function registerPageAndNodeTools(server: McpServer) {
     name: "framer_create_text_node",
     title: "Create text node",
     description:
-      "Create a new TextNode with the given attributes. If `text` is supplied it will be applied after creation via setText on the returned node.",
+      "Create a new TextNode with the given attributes. If `text` is supplied it is applied after creation via setText on the returned node. " +
+      "LIMITATIONS: " +
+      "(1) Same parentId-ignored hazard as create_frame — Framer may land the text under its current selection instead of parentId. This tool verifies landing and corrects or rolls back on failure (WRONG_PARENT). " +
+      "(2) Writes are serialized process-wide, so parallel create_* calls are safe but sequential.",
     inputSchema: z.object({
       attributes: LooseAttributes,
       parentId: NodeId.optional(),
@@ -81,13 +92,17 @@ export function registerPageAndNodeTools(server: McpServer) {
     }),
     annotations: mutation,
     handler: async ({ attributes, parentId, text }) => {
-      const node = await withFramer(async (f) => {
+      const node = await withFramerWrite(async (f) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const n = await f.createTextNode(attributes as any, parentId);
-        if (n && text !== undefined) await n.setText(text);
-        return n;
+        if (!n) throw new FramerToolError("Framer did not return a created text node.");
+        const newId = (n as { id?: string }).id;
+        if (parentId && newId) {
+          await ensureLandedUnder(f, newId, parentId, "create_text_node", { rollbackOnFailure: true });
+        }
+        if (text !== undefined) await n.setText(text);
+        return newId ? ((await f.getNode(newId)) ?? n) : n;
       });
-      if (!node) throw new FramerToolError("Framer did not return a created text node.");
       return ok({ node: serializeNode(node) });
     },
   });
@@ -99,7 +114,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     inputSchema: z.object({ name: z.string().min(1) }),
     annotations: mutation,
     handler: async ({ name }) => {
-      const node = await withFramer((f) => f.createComponentNode(name));
+      const node = await withFramerWrite((f) => f.createComponentNode(name));
       if (!node) throw new FramerToolError("Framer did not return a created component node.");
       return ok({ node: serializeNode(node) });
     },
@@ -121,7 +136,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     }),
     annotations: mutation,
     handler: async ({ url, attributes, parentId }) => {
-      const node = await withFramer(async (f) => {
+      const node = await withFramerWrite(async (f) => {
         const instance = await f.addComponentInstance({
           url,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -130,25 +145,10 @@ export function registerPageAndNodeTools(server: McpServer) {
         });
         const instanceId = (instance as { id?: string }).id;
         if (parentId && instanceId) {
-          const currentParent = await f.getParent(instanceId).catch(() => null);
-          const currentParentId = currentParent ? (currentParent as { id?: string }).id : null;
-          if (currentParentId !== parentId) {
-            // Framer landed it somewhere else. Try a corrective setParent.
-            try {
-              await f.setParent(instanceId, parentId);
-              await assertParent(f, instanceId, parentId, "add_component_instance (after corrective setParent)");
-            } catch (e) {
-              // Leave the node in place so the caller can inspect, but raise.
-              const msg = e instanceof Error ? e.message : String(e);
-              throw new FramerToolError(
-                `Component instance ${instanceId} was created but landed under ${currentParentId ?? "null"}, and the corrective move to ${parentId} failed: ${msg}`,
-                "Verify parentId exists on the same page, then try framer_set_parent manually.",
-                "WRONG_PARENT",
-              );
-            }
-          }
+          // Don't rollback here — instance may still be usable even if wrong parent.
+          await ensureLandedUnder(f, instanceId, parentId, "add_component_instance");
         }
-        return instance;
+        return instanceId ? ((await f.getNode(instanceId)) ?? instance) : instance;
       });
       return ok({ node: serializeNode(node) });
     },
@@ -165,7 +165,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     inputSchema: z.object({ nodeId: NodeId, attributes: LooseAttributes }),
     annotations: idempotentMutation,
     handler: async ({ nodeId, attributes }) => {
-      const node = await withFramer((f) =>
+      const node = await withFramerWrite((f) =>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         f.setAttributes(nodeId, attributes as any),
       );
@@ -190,7 +190,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     inputSchema: z.object({ nodeId: NodeId, text: z.string() }),
     annotations: idempotentMutation,
     handler: async ({ nodeId, text }) => {
-      await withFramer(async (f) => {
+      await withFramerWrite(async (f) => {
         const node = await f.getNode(nodeId);
         if (!node) {
           throw new FramerToolError(
@@ -225,9 +225,9 @@ export function registerPageAndNodeTools(server: McpServer) {
     }),
     annotations: idempotentMutation,
     handler: async ({ nodeId, parentId, index }) => {
-      await withFramer(async (f) => {
+      await withFramerWrite(async (f) => {
         await f.setParent(nodeId, parentId, index);
-        await assertParent(f, nodeId, parentId, "set_parent");
+        await ensureLandedUnder(f, nodeId, parentId, "set_parent");
       });
       return ok({ nodeId, parentId, index: index ?? null });
     },
@@ -251,7 +251,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     }),
     annotations: mutation,
     handler: async ({ nodeId, parentId, index }) => {
-      const result = await withFramer(async (f) => {
+      const result = await withFramerWrite(async (f) => {
         const clone = await f.cloneNode(nodeId);
         if (!clone) {
           throw new FramerToolError(
@@ -264,12 +264,9 @@ export function registerPageAndNodeTools(server: McpServer) {
         if (!parentId || !cloneId) return clone;
 
         try {
-          await f.setParent(cloneId, parentId, index);
-          // Verify — Framer's setParent can silently no-op for cross-page moves.
-          await assertParent(f, cloneId, parentId, "clone_node");
+          if (index !== undefined) await f.setParent(cloneId, parentId, index);
+          await ensureLandedUnder(f, cloneId, parentId, "clone_node", { rollbackOnFailure: true });
         } catch (reparentErr) {
-          // Rollback: remove the orphan clone so we don't leave a stray node
-          // on the wrong page.
           await bestEffortRemove(f, cloneId);
           if (reparentErr instanceof FramerToolError) throw reparentErr;
           const msg = reparentErr instanceof Error ? reparentErr.message : String(reparentErr);
@@ -296,7 +293,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     inputSchema: z.object({ nodeId: NodeId }),
     annotations: destructive,
     handler: async ({ nodeId }) => {
-      await withFramer(async (f) => {
+      await withFramerWrite(async (f) => {
         await f.removeNodes([nodeId]);
         await assertRemoved(f, nodeId);
       });
@@ -315,7 +312,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     }),
     annotations: mutation,
     handler: async ({ svg, name }) => {
-      await withFramer((f) =>
+      await withFramerWrite((f) =>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         f.addSVG({ svg, name } as any),
       );

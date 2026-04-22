@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { withFramer } from "../framer-client.js";
+import { withFramer, withFramerWrite } from "../framer-client.js";
 import { ok } from "../formatters.js";
 import { registerTool } from "./register.js";
 
@@ -63,7 +63,7 @@ export function registerStyleTools(server: McpServer) {
     }),
     annotations: mutation,
     handler: async (attrs) => {
-      const style = await withFramer((f) =>
+      const style = await withFramerWrite((f) =>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         f.createColorStyle(attrs as any),
       );
@@ -95,7 +95,7 @@ export function registerStyleTools(server: McpServer) {
     }),
     annotations: mutation,
     handler: async ({ attributes }) => {
-      const style = await withFramer((f) =>
+      const style = await withFramerWrite((f) =>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         f.createTextStyle(attributes as any),
       );

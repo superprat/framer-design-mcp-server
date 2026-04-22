@@ -5,6 +5,7 @@ import {
   isRetryableError,
   withConnection,
 } from "framer-api";
+import { serializeWrite } from "./mutex.js";
 
 interface FramerConfig {
   projectUrl: string;
@@ -62,7 +63,7 @@ async function sleep(ms: number) {
  * — they propagate immediately, already carrying an actionable message/hint.
  * Always closes the underlying connection, even on throw.
  */
-export async function withFramer<T>(fn: (framer: Framer) => Promise<T>): Promise<T> {
+async function runWithFramer<T>(fn: (framer: Framer) => Promise<T>): Promise<T> {
   const { projectUrl, apiKey } = loadConfig();
 
   let lastError: unknown;
@@ -78,6 +79,21 @@ export async function withFramer<T>(fn: (framer: Framer) => Promise<T>): Promise
     }
   }
   throw mapSdkError(lastError);
+}
+
+/** Open a Framer connection for a read operation. Runs concurrently with other reads. */
+export function withFramer<T>(fn: (framer: Framer) => Promise<T>): Promise<T> {
+  return runWithFramer(fn);
+}
+
+/**
+ * Open a Framer connection for a write operation. Serialized through a
+ * process-wide mutex so parallel tool calls don't race on Framer's shared
+ * selection-context state (which has caused create_* + add_component_instance
+ * to place nodes on the wrong page when invoked in parallel).
+ */
+export function withFramerWrite<T>(fn: (framer: Framer) => Promise<T>): Promise<T> {
+  return serializeWrite(() => runWithFramer(fn));
 }
 
 /**

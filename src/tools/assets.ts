@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { withFramer, FramerToolError } from "../framer-client.js";
+import { FramerToolError, withFramerWrite } from "../framer-client.js";
 import { ok } from "../formatters.js";
 import { registerTool } from "./register.js";
 
@@ -82,7 +82,7 @@ export function registerAssetTools(server: McpServer) {
     inputSchema: z.object({ image: ImageInput }),
     annotations: mutation,
     handler: async ({ image }) => {
-      const asset = await withFramer((f) =>
+      const asset = await withFramerWrite((f) =>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         f.uploadImage(toNamedImageAssetInput(image) as any),
       );
@@ -97,7 +97,7 @@ export function registerAssetTools(server: McpServer) {
     inputSchema: z.object({ image: ImageInput }),
     annotations: mutation,
     handler: async ({ image }) => {
-      await withFramer((f) =>
+      await withFramerWrite((f) =>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         f.addImage(toNamedImageAssetInput(image) as any),
       );
@@ -112,7 +112,7 @@ export function registerAssetTools(server: McpServer) {
     inputSchema: z.object({ file: ImageInput }),
     annotations: mutation,
     handler: async ({ file }) => {
-      const asset = await withFramer((f) =>
+      const asset = await withFramerWrite((f) =>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         f.uploadFile(toNamedFileAssetInput(file) as any),
       );

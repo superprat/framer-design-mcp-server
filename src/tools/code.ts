@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { withFramer, FramerToolError } from "../framer-client.js";
+import { FramerToolError, withFramer, withFramerWrite } from "../framer-client.js";
 import { ok } from "../formatters.js";
 import { registerTool } from "./register.js";
 
@@ -57,7 +57,7 @@ export function registerCodeTools(server: McpServer) {
     }),
     annotations: mutation,
     handler: async ({ name, code }) => {
-      const file = await withFramer((f) => f.createCodeFile(name, code));
+      const file = await withFramerWrite((f) => f.createCodeFile(name, code));
       return ok({ codeFile: stripCodeFile(file) });
     },
   });
