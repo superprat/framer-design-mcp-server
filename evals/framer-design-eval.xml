@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Evaluation: framer-design-mcp-server
+
+  These 10 Q/A pairs exercise read-only tools against a **seeded test project**.
+  Before running, create a Framer project matching this fixture:
+
+    Project:
+      - name: "MCP Eval Site"
+
+    Pages (WebPageNode):
+      - "/"        (home)
+      - "/about"
+      - "/pricing"
+      - "/blog"
+      - "/contact"
+
+    Pages (DesignPageNode):
+      - "Brand Guidelines"
+      - "Wireframes"
+
+    On "/about":
+      - A FrameNode named "Hero" at the top (child of the page)
+          - Inside Hero: a TextNode named "Heading" with text "About us"
+          - Inside Hero: a TextNode named "Subhead" with text "We build tools."
+      - A FrameNode named "TeamGrid" after Hero (8 child FrameNodes named "Member 1".."Member 8")
+
+    On "/pricing":
+      - 3 FrameNodes named "Plan — Starter", "Plan — Pro", "Plan — Enterprise"
+
+    Color styles:
+      - name="Primary", light="#0f172a"
+      - name="Accent",  light="#22c55e"
+      - name="Background", light="#ffffff", dark="#0a0a0a"
+
+    Text styles:
+      - name="Display"
+      - name="Body"
+
+    Code files:
+      - "Analytics.tsx"
+      - "Header.tsx"
+
+  Answers are graded by case-insensitive string comparison.
+-->
+<evaluation>
+
+  <qa_pair>
+    <question>What is the `name` of the connected Framer project? (Return the value of projectInfo.name.)</question>
+    <answer>MCP Eval Site</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>How many WebPageNodes exist in the project? (Use framer_find_nodes_by_type with type "WebPageNode" and return the total count as a decimal integer.)</question>
+    <answer>5</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>How many DesignPageNodes exist in the project? (Use framer_find_nodes_by_type with type "DesignPageNode" and return the total count.)</question>
+    <answer>2</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>What is the `path` attribute of the home WebPageNode in the project? (Look up the WebPageNode whose path represents the site root.)</question>
+    <answer>/</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>On the WebPageNode with path "/about", what is the `name` of its first direct child FrameNode? (Use framer_get_node_children on the page id.)</question>
+    <answer>Hero</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>How many direct children does the FrameNode named "TeamGrid" on the "/about" page have? (Return the count as a decimal integer.)</question>
+    <answer>8</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>On the "/pricing" page, how many FrameNodes have a name that starts with "Plan —"? (Use framer_get_node_children and count matching children.)</question>
+    <answer>3</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>In the project's color styles, what is the `light` CSS color value of the color style named "Primary"? (Use framer_list_color_styles.)</question>
+    <answer>#0f172a</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>How many color styles have a non-null `dark` value? (Use framer_list_color_styles and count entries where dark is not null.)</question>
+    <answer>1</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>How many code files exist in the project with a `.tsx` extension? (Use framer_list_code_files and count by filename suffix.)</question>
+    <answer>2</answer>
+  </qa_pair>
+
+</evaluation>
