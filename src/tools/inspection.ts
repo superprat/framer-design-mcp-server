@@ -1,23 +1,14 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { withFramer } from "../framer-client.js";
+import { FramerToolError, withFramer } from "../framer-client.js";
 import { ok, okMarkdown } from "../formatters.js";
+import { nodeIdentity, serializeNode } from "../node-serialize.js";
 import { NodeId, Pagination, paginate, ResponseFormat } from "../schemas.js";
+import { walkDescendants } from "../walk.js";
 import { registerTool } from "./register.js";
-
-const nodeSummary = (n: unknown) => {
-  // Node instances carry arbitrary methods; extract a stable subset for transport.
-  const node = n as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  for (const k of ["__class", "id", "name", "path", "locked", "visible"]) {
-    if (k in node) out[k] = node[k];
-  }
-  return out;
-};
 
 const readOnly = { readOnlyHint: true, idempotentHint: true };
 
-const PAGE_TYPES = ["WebPageNode", "DesignPageNode"] as const;
 const FINDABLE_TYPES = [
   "FrameNode",
   "TextNode",
@@ -56,12 +47,15 @@ export function registerInspectionTools(server: McpServer) {
   registerTool(server, {
     name: "framer_get_canvas_root",
     title: "Get canvas root",
-    description: "Return the project's canvas root node (parent of all pages).",
+    description:
+      "Return the project's single canvas root node (parent of all pages). " +
+      "NOTE: Framer has ONE canvas root for the whole project — it is not per-page. " +
+      "To list the contents of a specific page, use framer_get_node_children on that page's id.",
     inputSchema: z.object({}),
     annotations: readOnly,
     handler: async () => {
       const root = await withFramer((f) => f.getCanvasRoot());
-      return ok({ root: nodeSummary(root) });
+      return ok({ root: serializeNode(root) });
     },
   });
 
@@ -83,7 +77,7 @@ export function registerInspectionTools(server: McpServer) {
         ]);
         return [...web, ...design].map((p) => ({
           kind: (p as { __class: string }).__class,
-          ...nodeSummary(p),
+          ...nodeIdentity(p),
         }));
       });
       const page = paginate(pages, limit, offset);
@@ -105,25 +99,30 @@ export function registerInspectionTools(server: McpServer) {
   registerTool(server, {
     name: "framer_get_node",
     title: "Get node",
-    description: "Fetch a node by id. Returns class, name, and common attributes.",
+    description:
+      "Fetch a node by id. Returns every attribute the SDK exposes — including layout, text, background, and component fields (componentIdentifier, url, controls, etc.).",
     inputSchema: z.object({ nodeId: NodeId }),
     annotations: readOnly,
     handler: async ({ nodeId }) => {
       const node = await withFramer((f) => f.getNode(nodeId));
-      if (!node) return ok({ node: null });
-      return ok({ node: nodeSummary(node) });
+      if (!node) {
+        throw new FramerToolError(`Node ${nodeId} not found.`, undefined, "NODE_NOT_FOUND");
+      }
+      return ok({ node: serializeNode(node) });
     },
   });
 
   registerTool(server, {
     name: "framer_get_node_children",
     title: "Get node children",
-    description: "List direct children of a node.",
+    description:
+      "List direct children of a node with their full attributes. " +
+      "CAVEAT: For the primary breakpoint of a page (the Desktop frame), the Framer SDK sometimes returns no children even when the editor shows them — their descendants live on the secondary breakpoint frames (Tablet/Phone). If this tool returns an empty list for a frame you expect to be populated, try its sibling breakpoint frames.",
     inputSchema: z.object({ nodeId: NodeId, ...Pagination }),
     annotations: readOnly,
     handler: async ({ nodeId, limit, offset }) => {
       const children = await withFramer((f) => f.getChildren(nodeId));
-      const mapped = children.map(nodeSummary);
+      const mapped = children.map(serializeNode);
       return ok(paginate(mapped, limit, offset) as unknown as Record<string, unknown>);
     },
   });
@@ -136,7 +135,7 @@ export function registerInspectionTools(server: McpServer) {
     annotations: readOnly,
     handler: async ({ nodeId }) => {
       const parent = await withFramer((f) => f.getParent(nodeId));
-      return ok({ parent: parent ? nodeSummary(parent) : null });
+      return ok({ parent: parent ? serializeNode(parent) : null });
     },
   });
 
@@ -156,19 +155,34 @@ export function registerInspectionTools(server: McpServer) {
     name: "framer_find_nodes_by_type",
     title: "Find nodes by type",
     description:
-      "Return every node of the given class in the project (e.g. 'FrameNode', 'TextNode'). Paginated.",
+      "Return every node of the given class, optionally scoped to the subtree under `scopeNodeId`. " +
+      "If scopeNodeId is set, only nodes that are descendants of that node (inclusive) are returned.",
     inputSchema: z.object({
       type: z.enum(FINDABLE_TYPES),
+      scopeNodeId: NodeId.optional().describe(
+        "Optional: restrict results to descendants of this node id (inclusive).",
+      ),
       ...Pagination,
     }),
     annotations: readOnly,
-    handler: async ({ type, limit, offset }) => {
-      const nodes = await withFramer(async (f) => {
+    handler: async ({ type, scopeNodeId, limit, offset }) => {
+      const result = await withFramer(async (f) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (await (f.getNodesWithType as any)(type)) as unknown[];
+        const all = (await (f.getNodesWithType as any)(type)) as unknown[];
+        if (!scopeNodeId) return { nodes: all, truncated: false };
+        const scope = await walkDescendants(f, scopeNodeId);
+        const filtered = all.filter((n) => {
+          const id = (n as { id?: string }).id;
+          return id && scope.ids.has(id);
+        });
+        return { nodes: filtered, truncated: scope.truncated };
       });
-      const mapped = nodes.map(nodeSummary);
-      return ok(paginate(mapped, limit, offset) as unknown as Record<string, unknown>);
+      const mapped = result.nodes.map(serializeNode);
+      const page = paginate(mapped, limit, offset);
+      return ok({
+        ...(page as unknown as Record<string, unknown>),
+        scope_truncated: result.truncated,
+      });
     },
   });
 
@@ -176,24 +190,94 @@ export function registerInspectionTools(server: McpServer) {
     name: "framer_find_nodes_by_attribute",
     title: "Find nodes by attribute",
     description:
-      "Return nodes that support a given attribute key. If onlySet=true, only nodes whose value is set are returned.",
+      "Find nodes that have a given attribute key. Optional filters: " +
+      "`onlySet` to require the value is set, `value` to match a specific value exactly, " +
+      "`scopeNodeId` to restrict to descendants of that node.",
     inputSchema: z.object({
       attribute: z.string().describe("Attribute key, e.g. 'name', 'backgroundColor', 'link'."),
-      onlySet: z.boolean().optional().describe("If true, filter to nodes where the attribute value is set."),
+      value: z
+        .union([z.string(), z.number(), z.boolean(), z.null()])
+        .optional()
+        .describe("Optional exact-match filter on the attribute's value."),
+      onlySet: z.boolean().optional().describe("If true, include only nodes where the attribute is set."),
+      scopeNodeId: NodeId.optional().describe("Optional: restrict results to descendants of this node id."),
       ...Pagination,
     }),
     annotations: readOnly,
-    handler: async ({ attribute, onlySet, limit, offset }) => {
-      const nodes = await withFramer(async (f) => {
+    handler: async ({ attribute, value, onlySet, scopeNodeId, limit, offset }) => {
+      const result = await withFramer(async (f) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const fn: any = onlySet ? f.getNodesWithAttributeSet : f.getNodesWithAttribute;
-        return (await fn.call(f, attribute)) as unknown[];
+        let nodes = (await fn.call(f, attribute)) as unknown[];
+
+        if (scopeNodeId) {
+          const scope = await walkDescendants(f, scopeNodeId);
+          nodes = nodes.filter((n) => {
+            const id = (n as { id?: string }).id;
+            return id && scope.ids.has(id);
+          });
+        }
+
+        if (value !== undefined) {
+          nodes = nodes.filter((n) => {
+            const v = (n as Record<string, unknown>)[attribute];
+            return v === value;
+          });
+        }
+
+        return nodes;
       });
-      const mapped = nodes.map(nodeSummary);
+      const mapped = result.map(serializeNode);
       return ok(paginate(mapped, limit, offset) as unknown as Record<string, unknown>);
     },
   });
 
-  // Mark the unused PAGE_TYPES as intentionally exported (documentation-only).
-  void PAGE_TYPES;
+  registerTool(server, {
+    name: "framer_find_nodes_by_name",
+    title: "Find nodes by name",
+    description:
+      "Find nodes whose `name` attribute matches. Use `equals` for exact match or `contains` for substring match. Optionally scoped to `scopeNodeId`.",
+    inputSchema: z
+      .object({
+        equals: z.string().optional(),
+        contains: z.string().optional(),
+        caseInsensitive: z.boolean().optional().describe("Default true."),
+        scopeNodeId: NodeId.optional(),
+        ...Pagination,
+      })
+      .refine((v) => !!v.equals || !!v.contains, {
+        message: "Provide either `equals` or `contains`.",
+      }),
+    annotations: readOnly,
+    handler: async ({ equals, contains, caseInsensitive, scopeNodeId, limit, offset }) => {
+      const ci = caseInsensitive ?? true;
+      const norm = (s: string) => (ci ? s.toLowerCase() : s);
+      const matches = (name: string) => {
+        if (equals !== undefined) return norm(name) === norm(equals);
+        if (contains !== undefined) return norm(name).includes(norm(contains));
+        return false;
+      };
+
+      const result = await withFramer(async (f) => {
+        // `name` attribute is broadly supported, so getNodesWithAttribute gives
+        // us the universe efficiently; scoping happens after.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const all = (await (f.getNodesWithAttribute as any)("name")) as unknown[];
+        let nodes = all.filter((n) => {
+          const nm = (n as { name?: string | null }).name;
+          return typeof nm === "string" && matches(nm);
+        });
+        if (scopeNodeId) {
+          const scope = await walkDescendants(f, scopeNodeId);
+          nodes = nodes.filter((n) => {
+            const id = (n as { id?: string }).id;
+            return id && scope.ids.has(id);
+          });
+        }
+        return nodes;
+      });
+      const mapped = result.map(serializeNode);
+      return ok(paginate(mapped, limit, offset) as unknown as Record<string, unknown>);
+    },
+  });
 }

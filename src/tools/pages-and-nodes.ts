@@ -1,21 +1,15 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isTextNode } from "framer-api";
 import { z } from "zod";
-import { withFramer, FramerToolError } from "../framer-client.js";
+import { FramerToolError, withFramer } from "../framer-client.js";
 import { ok } from "../formatters.js";
-import { NodeId, LooseAttributes } from "../schemas.js";
+import { serializeNode } from "../node-serialize.js";
+import { LooseAttributes, NodeId } from "../schemas.js";
 import { registerTool } from "./register.js";
 
 const mutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
 const idempotentMutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: true };
 const destructive = { readOnlyHint: false, destructiveHint: true, idempotentHint: true };
-
-const nodeSummary = (n: unknown) => {
-  const node = n as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  for (const k of ["__class", "id", "name", "path"]) if (k in node) out[k] = node[k];
-  return out;
-};
 
 export function registerPageAndNodeTools(server: McpServer) {
   // ------- Pages -------
@@ -23,14 +17,15 @@ export function registerPageAndNodeTools(server: McpServer) {
     name: "framer_create_web_page",
     title: "Create web page",
     description:
-      "Create a new WebPageNode at the given path (e.g. '/about'). Path should start with '/'.",
+      "Create a new WebPageNode at the given path (e.g. '/about'). Path should start with '/'. " +
+      "NOTE: Framer may auto-insert a default Desktop breakpoint frame into the new page.",
     inputSchema: z.object({
       pagePath: z.string().min(1).describe("URL path, e.g. '/about'."),
     }),
     annotations: mutation,
     handler: async ({ pagePath }) => {
       const page = await withFramer((f) => f.createWebPage(pagePath));
-      return ok({ page: nodeSummary(page) }, `Created web page at ${pagePath}`);
+      return ok({ page: serializeNode(page) }, `Created web page at ${pagePath}`);
     },
   });
 
@@ -42,7 +37,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     annotations: mutation,
     handler: async ({ pageName }) => {
       const page = await withFramer((f) => f.createDesignPage(pageName));
-      return ok({ page: nodeSummary(page) }, `Created design page "${pageName}"`);
+      return ok({ page: serializeNode(page) }, `Created design page "${pageName}"`);
     },
   });
 
@@ -63,7 +58,7 @@ export function registerPageAndNodeTools(server: McpServer) {
         f.createFrameNode(attributes as any, parentId),
       );
       if (!node) throw new FramerToolError("Framer did not return a created frame node.");
-      return ok({ node: nodeSummary(node) });
+      return ok({ node: serializeNode(node) });
     },
   });
 
@@ -71,14 +66,11 @@ export function registerPageAndNodeTools(server: McpServer) {
     name: "framer_create_text_node",
     title: "Create text node",
     description:
-      "Create a new TextNode with the given attributes. To set the text content, follow with framer_set_text using the returned id.",
+      "Create a new TextNode with the given attributes. If `text` is supplied it will be applied after creation via setText on the returned node.",
     inputSchema: z.object({
       attributes: LooseAttributes,
       parentId: NodeId.optional(),
-      text: z
-        .string()
-        .optional()
-        .describe("Optional plaintext content. If provided, will be applied after creation."),
+      text: z.string().optional().describe("Optional plaintext content applied after creation."),
     }),
     annotations: mutation,
     handler: async ({ attributes, parentId, text }) => {
@@ -89,7 +81,7 @@ export function registerPageAndNodeTools(server: McpServer) {
         return n;
       });
       if (!node) throw new FramerToolError("Framer did not return a created text node.");
-      return ok({ node: nodeSummary(node) });
+      return ok({ node: serializeNode(node) });
     },
   });
 
@@ -102,7 +94,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     handler: async ({ name }) => {
       const node = await withFramer((f) => f.createComponentNode(name));
       if (!node) throw new FramerToolError("Framer did not return a created component node.");
-      return ok({ node: nodeSummary(node) });
+      return ok({ node: serializeNode(node) });
     },
   });
 
@@ -110,7 +102,8 @@ export function registerPageAndNodeTools(server: McpServer) {
     name: "framer_add_component_instance",
     title: "Add component instance",
     description:
-      "Insert an instance of a shared/remote component, identified by its module URL, optionally into a parent node.",
+      "Insert an instance of a shared/remote component by its module URL, optionally into a parent node. " +
+      "Use framer_get_node on an existing ComponentInstanceNode to read its `url` and re-insert elsewhere.",
     inputSchema: z.object({
       url: z.string().url(),
       attributes: LooseAttributes.optional(),
@@ -126,7 +119,7 @@ export function registerPageAndNodeTools(server: McpServer) {
           parentId,
         }),
       );
-      return ok({ node: nodeSummary(node) });
+      return ok({ node: serializeNode(node) });
     },
   });
 
@@ -135,7 +128,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     name: "framer_set_node_attributes",
     title: "Set node attributes",
     description:
-      "Update any editable attributes on a node (partial merge). Returns the updated node summary.",
+      "Update any editable attributes on a node (partial merge). Returns the updated node.",
     inputSchema: z.object({ nodeId: NodeId, attributes: LooseAttributes }),
     annotations: idempotentMutation,
     handler: async ({ nodeId, attributes }) => {
@@ -143,8 +136,14 @@ export function registerPageAndNodeTools(server: McpServer) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         f.setAttributes(nodeId, attributes as any),
       );
-      if (!node) throw new FramerToolError(`Node ${nodeId} was not updated (may not exist).`);
-      return ok({ node: nodeSummary(node) });
+      if (!node) {
+        throw new FramerToolError(
+          `Node ${nodeId} was not updated (may not exist).`,
+          undefined,
+          "NODE_NOT_FOUND",
+        );
+      }
+      return ok({ node: serializeNode(node) });
     },
   });
 
@@ -157,11 +156,18 @@ export function registerPageAndNodeTools(server: McpServer) {
     handler: async ({ nodeId, text }) => {
       await withFramer(async (f) => {
         const node = await f.getNode(nodeId);
-        if (!node) throw new FramerToolError(`Node ${nodeId} not found.`);
+        if (!node) {
+          throw new FramerToolError(
+            `Node ${nodeId} not found.`,
+            undefined,
+            "NODE_NOT_FOUND",
+          );
+        }
         if (!isTextNode(node)) {
           throw new FramerToolError(
             `Node ${nodeId} is not a TextNode (got ${(node as { __class: string }).__class}).`,
             "Use framer_set_node_attributes for non-text nodes, or framer_create_text_node to make a new one.",
+            "WRONG_NODE_TYPE",
           );
         }
         await node.setText(text);
@@ -190,13 +196,54 @@ export function registerPageAndNodeTools(server: McpServer) {
   registerTool(server, {
     name: "framer_clone_node",
     title: "Clone node",
-    description: "Duplicate a node and return the new node's id.",
-    inputSchema: z.object({ nodeId: NodeId }),
+    description:
+      "Duplicate a node and return the new node's id. " +
+      "If `parentId` is provided, the clone is reparented there after creation (via setParent). " +
+      "CAVEATS: " +
+      "(1) The Framer SDK's cloneNode does not accept a destination — without `parentId`, the clone lands wherever Framer chooses (usually next to the source). " +
+      "(2) Depth of the clone is determined by the SDK; complex nested hierarchies may be shallow-cloned. Inspect with framer_get_node_children after cloning. " +
+      "(3) If `parentId` is set and the reparent fails, the orphan clone is automatically removed to preserve project state.",
+    inputSchema: z.object({
+      nodeId: NodeId,
+      parentId: NodeId.optional().describe("Optional: reparent the clone under this node after creation."),
+      index: z.number().int().min(0).optional().describe("Optional: insert position under parentId."),
+    }),
     annotations: mutation,
-    handler: async ({ nodeId }) => {
-      const node = await withFramer((f) => f.cloneNode(nodeId));
-      if (!node) throw new FramerToolError(`Node ${nodeId} could not be cloned.`);
-      return ok({ node: nodeSummary(node) });
+    handler: async ({ nodeId, parentId, index }) => {
+      const result = await withFramer(async (f) => {
+        const clone = await f.cloneNode(nodeId);
+        if (!clone) {
+          throw new FramerToolError(
+            `Node ${nodeId} could not be cloned.`,
+            undefined,
+            "CLONE_FAILED",
+          );
+        }
+        const cloneId = (clone as { id?: string }).id;
+        if (!parentId || !cloneId) return clone;
+
+        try {
+          await f.setParent(cloneId, parentId, index);
+        } catch (reparentErr) {
+          // Rollback: remove the orphan clone so we don't leave stray nodes
+          // in an unintended location.
+          try {
+            await f.removeNodes([cloneId]);
+          } catch {
+            // best-effort rollback; surface the original error either way
+          }
+          const msg = reparentErr instanceof Error ? reparentErr.message : String(reparentErr);
+          throw new FramerToolError(
+            `Clone created ${cloneId} but reparenting under ${parentId} failed and the clone was removed: ${msg}`,
+            "Verify parentId exists and accepts children of this type.",
+            "CLONE_REPARENT_FAILED",
+          );
+        }
+        // Re-read the clone so the returned attributes reflect the new parent.
+        const reread = await f.getNode(cloneId);
+        return reread ?? clone;
+      });
+      return ok({ node: serializeNode(result) });
     },
   });
 
@@ -216,7 +263,7 @@ export function registerPageAndNodeTools(server: McpServer) {
     name: "framer_add_svg",
     title: "Add SVG",
     description:
-      "Insert an SVG onto the canvas. Accepts an object with svg source, and optional name/parentId.",
+      "Insert an SVG onto the canvas. The Framer SDK's addSVG does not accept a parentId — the SVG is placed at the current canvas context (typically the active page).",
     inputSchema: z.object({
       svg: z.string().describe("Raw SVG source."),
       name: z.string().optional(),

@@ -8,9 +8,32 @@ const readOnly = { readOnlyHint: true, idempotentHint: true };
 const mutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
 
 const stripStyle = (s: unknown) => {
+  if (s == null || typeof s !== "object") return {};
   const v = s as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const k of ["id", "name", "path", "light", "dark"]) if (k in v) out[k] = v[k];
+  const keys = [
+    "id",
+    "name",
+    "path",
+    "light",
+    "dark",
+    "fontSize",
+    "fontWeight",
+    "fontStyle",
+    "lineHeight",
+    "letterSpacing",
+    "textAlignment",
+    "textDecoration",
+    "textTransform",
+    "color",
+    "breakpoints",
+  ];
+  for (const k of keys) {
+    if (k in v) {
+      const val = v[k];
+      if (typeof val !== "function") out[k] = val;
+    }
+  }
   return out;
 };
 
@@ -56,14 +79,7 @@ export function registerStyleTools(server: McpServer) {
     annotations: readOnly,
     handler: async () => {
       const styles = await withFramer((f) => f.getTextStyles());
-      const mapped = styles.map((s) => {
-        const v = s as unknown as Record<string, unknown>;
-        const out: Record<string, unknown> = {};
-        for (const k of ["id", "name", "path", "fontSize", "fontWeight", "lineHeight", "letterSpacing"])
-          if (k in v) out[k] = v[k];
-        return out;
-      });
-      return ok({ textStyles: mapped, count: styles.length });
+      return ok({ textStyles: styles.map(stripStyle), count: styles.length });
     },
   });
 
@@ -83,10 +99,7 @@ export function registerStyleTools(server: McpServer) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         f.createTextStyle(attributes as any),
       );
-      const v = style as unknown as Record<string, unknown>;
-      const out: Record<string, unknown> = {};
-      for (const k of ["id", "name", "path"]) if (k in v) out[k] = v[k];
-      return ok({ style: out });
+      return ok({ style: stripStyle(style) });
     },
   });
 

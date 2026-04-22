@@ -57,8 +57,10 @@ async function sleep(ms: number) {
 }
 
 /**
- * Open a Framer connection for the duration of `fn`, retrying on transient SDK
- * errors. Always closes the underlying connection, even on throw.
+ * Open a Framer connection for the duration of `fn`, retrying only transient
+ * SDK errors. Our own errors (FramerToolError, ConfigError) are never retried
+ * — they propagate immediately, already carrying an actionable message/hint.
+ * Always closes the underlying connection, even on throw.
  */
 export async function withFramer<T>(fn: (framer: Framer) => Promise<T>): Promise<T> {
   const { projectUrl, apiKey } = loadConfig();
@@ -69,6 +71,8 @@ export async function withFramer<T>(fn: (framer: Framer) => Promise<T>): Promise
       return await withConnection(projectUrl, fn, apiKey);
     } catch (err) {
       lastError = err;
+      // Our own business errors bypass retry.
+      if (err instanceof FramerToolError || err instanceof ConfigError) throw err;
       if (!isRetryableError(err) || attempt === MAX_RETRIES - 1) break;
       await sleep(BASE_BACKOFF_MS * 2 ** attempt);
     }
@@ -76,26 +80,32 @@ export async function withFramer<T>(fn: (framer: Framer) => Promise<T>): Promise
   throw mapSdkError(lastError);
 }
 
-function mapSdkError(err: unknown): FramerToolError {
+/**
+ * Map any error from the Framer SDK into a FramerToolError carrying the raw
+ * code, message, and (where known) an actionable hint. The agent sees
+ * message + code + hint in the tool error payload.
+ */
+export function mapSdkError(err: unknown): FramerToolError {
   if (err instanceof FramerToolError) return err;
+  if (err instanceof ConfigError) return new FramerToolError(err.message);
 
   if (err instanceof FramerAPIError) {
-    return new FramerToolError(
-      err.message,
-      hintForErrorCode(err.code),
-      String(err.code),
-    );
+    const code = String(err.code);
+    return new FramerToolError(err.message, hintForErrorCode(code), code);
   }
   if (err instanceof FramerPluginClosedError) {
     return new FramerToolError(
       "The Framer connection closed before the operation completed.",
       "Retry the tool call. If the error persists, verify FRAMER_PROJECT_URL is reachable and FRAMER_API_KEY is still valid.",
+      "CONNECTION_CLOSED",
     );
   }
   if (err instanceof Error) {
-    return new FramerToolError(err.message);
+    // Surface the raw SDK message even when we can't classify the error type.
+    const code = (err as { code?: string }).code;
+    return new FramerToolError(err.message, undefined, code);
   }
-  return new FramerToolError("Unknown error from the Framer SDK.");
+  return new FramerToolError(`Unknown error from the Framer SDK: ${String(err)}`);
 }
 
 const HINTS: Record<string, string> = {
@@ -103,12 +113,14 @@ const HINTS: Record<string, string> = {
   NODE_NOT_FOUND: "The referenced node does not exist in this project.",
   PROJECT_CLOSED: "The project is not reachable. Verify FRAMER_PROJECT_URL.",
   POOL_EXHAUSTED: "The Framer API is at capacity. Wait a moment and retry.",
-  TIMEOUT: "The operation timed out. Retry or reduce the scope (e.g. paginate).",
+  TIMEOUT:
+    "The operation timed out server-side. For screenshots, try lowering `scale` or supplying a `clip`. Otherwise retry or reduce the scope (e.g. paginate).",
   INVALID_REQUEST: "Check tool arguments — likely an invalid id or attribute value.",
   SCREENSHOT_TOO_LARGE: "Lower the scale (e.g. 1 instead of 2) or supply a smaller clip region.",
   INTERNAL: "Framer returned an internal error. Retry; if it persists, report to server-api-feedback@framer.com.",
+  CONNECTION_CLOSED: "The connection was dropped. Retry the tool.",
 };
 
-function hintForErrorCode(code: string | number | undefined): string | undefined {
-  return HINTS[String(code ?? "")];
+function hintForErrorCode(code: string | undefined): string | undefined {
+  return code ? HINTS[code] : undefined;
 }

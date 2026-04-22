@@ -33,9 +33,9 @@ export function okImage(data: Buffer, mimeType: string, summary: string): ToolRe
 
 export function toolError(err: unknown): ToolResult {
   const e = err as Partial<FramerToolError> & Error;
-  const parts = [e.message ?? String(err)];
+  const header = e.code ? `Framer error [${e.code}]: ${e.message ?? String(err)}` : `Error: ${e.message ?? String(err)}`;
+  const parts = [header];
   if (e.hint) parts.push(`Hint: ${e.hint}`);
-  if (e.code) parts.push(`Code: ${e.code}`);
   return {
     isError: true,
     content: [{ type: "text", text: parts.join("\n") }],
