@@ -7,54 +7,69 @@ import { registerTool } from "./register.js";
 const mutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
 
 /** Shared schema for an image/file input. Either a public URL or raw bytes. */
-const ImageInput = z
-  .object({
-    name: z.string().optional().describe("Display name for the asset."),
-    url: z
-      .string()
-      .url()
-      .optional()
-      .describe("Public URL Framer can fetch. Mutually exclusive with bytesBase64."),
-    bytesBase64: z
-      .string()
-      .optional()
-      .describe("Base64-encoded bytes. Requires mimeType. Mutually exclusive with url."),
-    mimeType: z
-      .string()
-      .optional()
-      .describe("MIME type, required when bytesBase64 is provided, e.g. 'image/png'."),
-  })
-  .refine((v) => !!v.url !== !!v.bytesBase64, {
-    message: "Provide exactly one of `url` or `bytesBase64`.",
-  });
+const ImageInput = z.object({
+  name: z.string().optional().describe("Display name for the asset."),
+  url: z
+    .string()
+    .url()
+    .optional()
+    .describe("Public URL Framer can fetch. Mutually exclusive with bytesBase64."),
+  bytesBase64: z
+    .string()
+    .optional()
+    .describe("Base64-encoded bytes. Requires mimeType. Mutually exclusive with url."),
+  mimeType: z
+    .string()
+    .optional()
+    .describe("MIME type, required when bytesBase64 is provided, e.g. 'image/png'."),
+});
 
 type ImageInput = z.infer<typeof ImageInput>;
 
+function validateImageInput(input: ImageInput): void {
+  if (!input.url === !input.bytesBase64) {
+    throw new FramerToolError(
+      "Provide exactly one of `url` or `bytesBase64`.",
+      undefined,
+      "INVALID_ARGUMENTS",
+    );
+  }
+  if (input.bytesBase64 && !input.mimeType) {
+    throw new FramerToolError(
+      "`mimeType` is required when supplying `bytesBase64`.",
+      undefined,
+      "INVALID_ARGUMENTS",
+    );
+  }
+}
+
 function toNamedImageAssetInput(input: ImageInput) {
+  validateImageInput(input);
   if (input.url) {
     return { name: input.name, image: input.url };
-  }
-  if (!input.mimeType) {
-    throw new FramerToolError("`mimeType` is required when supplying `bytesBase64`.");
   }
   const bytes = Buffer.from(input.bytesBase64 ?? "", "base64");
   return {
     name: input.name,
-    image: { bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength), mimeType: input.mimeType },
+    image: {
+      bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+      mimeType: input.mimeType!,
+    },
   };
 }
 
 function toNamedFileAssetInput(input: ImageInput) {
+  validateImageInput(input);
   if (input.url) {
     return { name: input.name, file: input.url };
-  }
-  if (!input.mimeType) {
-    throw new FramerToolError("`mimeType` is required when supplying `bytesBase64`.");
   }
   const bytes = Buffer.from(input.bytesBase64 ?? "", "base64");
   return {
     name: input.name,
-    file: { bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength), mimeType: input.mimeType },
+    file: {
+      bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+      mimeType: input.mimeType!,
+    },
   };
 }
 

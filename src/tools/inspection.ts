@@ -4,7 +4,7 @@ import { FramerToolError, withFramer } from "../framer-client.js";
 import { ok, okMarkdown } from "../formatters.js";
 import { nodeIdentity, serializeNode } from "../node-serialize.js";
 import { NodeId, Pagination, paginate, ResponseFormat } from "../schemas.js";
-import { walkDescendants } from "../walk.js";
+import { walkDescendantNodes, walkDescendants } from "../walk.js";
 import { registerTool } from "./register.js";
 
 const readOnly = { readOnlyHint: true, idempotentHint: true };
@@ -116,8 +116,11 @@ export function registerInspectionTools(server: McpServer) {
     name: "framer_get_node_children",
     title: "Get node children",
     description:
-      "List direct children of a node with their full attributes. " +
-      "CAVEAT: For the primary breakpoint of a page (the Desktop frame), the Framer SDK sometimes returns no children even when the editor shows them — their descendants live on the secondary breakpoint frames (Tablet/Phone). If this tool returns an empty list for a frame you expect to be populated, try its sibling breakpoint frames.",
+      "List DIRECT children of a node with their full attributes. " +
+      "LIMITATIONS: " +
+      "(1) The Framer SDK sometimes returns an empty list for the primary breakpoint of a page (the Desktop frame) even when the editor shows children — those descendants may be reachable only via framer_list_descendants or framer_find_nodes_by_attribute scoped to the page. " +
+      "(2) Newly created frames may report 0 children immediately after creation due to eventual-consistency on the Framer side; retry the call or use framer_get_node_parent on the expected children to verify placement. " +
+      "(3) If getChildren returns empty but you know content exists, try framer_list_descendants (BFS walk that works around these quirks).",
     inputSchema: z.object({ nodeId: NodeId, ...Pagination }),
     annotations: readOnly,
     handler: async ({ nodeId, limit, offset }) => {
@@ -128,9 +131,35 @@ export function registerInspectionTools(server: McpServer) {
   });
 
   registerTool(server, {
+    name: "framer_list_descendants",
+    title: "List descendants (BFS walk)",
+    description:
+      "Return EVERY descendant of `rootId` (inclusive) by breadth-first walking the tree via getChildren. " +
+      "Use this as a fallback when framer_get_node_children returns an unexpectedly empty list (common for the primary breakpoint frame or freshly created frames). " +
+      "Bounded at `maxNodes` (default 2000) to guard against huge projects; the response includes `truncated: true` if the cap was hit.",
+    inputSchema: z.object({
+      rootId: NodeId,
+      maxNodes: z.number().int().min(1).max(10_000).optional().describe("Hard cap. Default 2000."),
+      ...Pagination,
+    }),
+    annotations: readOnly,
+    handler: async ({ rootId, maxNodes, limit, offset }) => {
+      const result = await withFramer((f) => walkDescendantNodes(f, rootId, maxNodes ?? 2000));
+      const mapped = result.nodes.map(serializeNode);
+      const page = paginate(mapped, limit, offset);
+      return ok({
+        ...(page as unknown as Record<string, unknown>),
+        truncated: result.truncated,
+      });
+    },
+  });
+
+  registerTool(server, {
     name: "framer_get_node_parent",
     title: "Get node parent",
-    description: "Return the parent of a node, or null if it is the canvas root.",
+    description:
+      "Return the parent of a node, or null if it is the canvas root. " +
+      "LIMITATION: immediately after a write (create_frame, add_component_instance, set_parent), this may return null spuriously due to Framer eventual-consistency. If the next call succeeds with the expected parent, trust that reading.",
     inputSchema: z.object({ nodeId: NodeId }),
     annotations: readOnly,
     handler: async ({ nodeId }) => {
@@ -237,19 +266,29 @@ export function registerInspectionTools(server: McpServer) {
     title: "Find nodes by name",
     description:
       "Find nodes whose `name` attribute matches. Use `equals` for exact match or `contains` for substring match. Optionally scoped to `scopeNodeId`.",
-    inputSchema: z
-      .object({
-        equals: z.string().optional(),
-        contains: z.string().optional(),
-        caseInsensitive: z.boolean().optional().describe("Default true."),
-        scopeNodeId: NodeId.optional(),
-        ...Pagination,
-      })
-      .refine((v) => !!v.equals || !!v.contains, {
-        message: "Provide either `equals` or `contains`.",
-      }),
+    inputSchema: z.object({
+      equals: z.string().optional().describe("Exact match (uses caseInsensitive). Mutually exclusive with `contains`."),
+      contains: z.string().optional().describe("Substring match (uses caseInsensitive). Mutually exclusive with `equals`."),
+      caseInsensitive: z.boolean().optional().describe("Default true."),
+      scopeNodeId: NodeId.optional().describe("Optional: restrict to descendants of this node id."),
+      ...Pagination,
+    }),
     annotations: readOnly,
     handler: async ({ equals, contains, caseInsensitive, scopeNodeId, limit, offset }) => {
+      if (equals === undefined && contains === undefined) {
+        throw new FramerToolError(
+          "Provide either `equals` (exact match) or `contains` (substring match).",
+          "Example: { equals: 'Hero' } or { contains: 'nav' }.",
+          "INVALID_ARGUMENTS",
+        );
+      }
+      if (equals !== undefined && contains !== undefined) {
+        throw new FramerToolError(
+          "`equals` and `contains` are mutually exclusive — provide only one.",
+          undefined,
+          "INVALID_ARGUMENTS",
+        );
+      }
       const ci = caseInsensitive ?? true;
       const norm = (s: string) => (ci ? s.toLowerCase() : s);
       const matches = (name: string) => {

@@ -5,6 +5,7 @@ import { FramerToolError, withFramer } from "../framer-client.js";
 import { ok } from "../formatters.js";
 import { serializeNode } from "../node-serialize.js";
 import { LooseAttributes, NodeId } from "../schemas.js";
+import { assertParent, assertRemoved, bestEffortRemove } from "../verify.js";
 import { registerTool } from "./register.js";
 
 const mutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
@@ -18,7 +19,9 @@ export function registerPageAndNodeTools(server: McpServer) {
     title: "Create web page",
     description:
       "Create a new WebPageNode at the given path (e.g. '/about'). Path should start with '/'. " +
-      "NOTE: Framer may auto-insert a default Desktop breakpoint frame into the new page.",
+      "LIMITATIONS: " +
+      "(1) Framer auto-inserts a default primary breakpoint frame (the Desktop frame, ~1200x1080, no layout) as a child of the new page — you cannot skip or remove it (see framer_remove_node). " +
+      "(2) To customize the primary breakpoint dimensions/layout, call framer_set_node_attributes on it after creation.",
     inputSchema: z.object({
       pagePath: z.string().min(1).describe("URL path, e.g. '/about'."),
     }),
@@ -46,7 +49,11 @@ export function registerPageAndNodeTools(server: McpServer) {
     name: "framer_create_frame",
     title: "Create frame node",
     description:
-      "Create a new FrameNode with the given attributes, optionally as a child of parentId. Attributes may include width, height, backgroundColor, name, etc.",
+      "Create a new FrameNode with the given attributes, optionally as a child of parentId. " +
+      "ATTRIBUTE VALUE FORMAT: dimensions must be CSS-unit strings, not bare numbers. " +
+      "Use `width: '1440px'` not `width: 1440` — bare numbers are silently coerced to 100. " +
+      "Same for `height`, `borderRadius`, `padding`, `gap`, etc. Colors should be hex or rgb() strings. " +
+      "LIMITATION: some attributes (e.g. `position: 'sticky'`, certain nested layout controls) may be rejected or coerced at creation time and require a follow-up framer_set_node_attributes call to take effect.",
     inputSchema: z.object({
       attributes: LooseAttributes,
       parentId: NodeId.optional(),
@@ -103,7 +110,10 @@ export function registerPageAndNodeTools(server: McpServer) {
     title: "Add component instance",
     description:
       "Insert an instance of a shared/remote component by its module URL, optionally into a parent node. " +
-      "Use framer_get_node on an existing ComponentInstanceNode to read its `url` and re-insert elsewhere.",
+      "Use framer_get_node on an existing ComponentInstanceNode to read its `url` and re-insert elsewhere. " +
+      "LIMITATIONS: " +
+      "(1) Passing `attributes` at creation sometimes triggers a 'Moving nodes is not allowed in view only mode' error from Framer — retry without attributes and apply them afterwards with framer_set_node_attributes. " +
+      "(2) Framer may place the new instance in the page's primary breakpoint auto-frame regardless of `parentId`. This tool verifies landing and attempts a corrective framer_set_parent if the instance ends up in the wrong place — if that also fails, an error is returned so you don't silently leave nodes in the wrong location.",
     inputSchema: z.object({
       url: z.string().url(),
       attributes: LooseAttributes.optional(),
@@ -111,14 +121,35 @@ export function registerPageAndNodeTools(server: McpServer) {
     }),
     annotations: mutation,
     handler: async ({ url, attributes, parentId }) => {
-      const node = await withFramer((f) =>
-        f.addComponentInstance({
+      const node = await withFramer(async (f) => {
+        const instance = await f.addComponentInstance({
           url,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           attributes: (attributes ?? {}) as any,
           parentId,
-        }),
-      );
+        });
+        const instanceId = (instance as { id?: string }).id;
+        if (parentId && instanceId) {
+          const currentParent = await f.getParent(instanceId).catch(() => null);
+          const currentParentId = currentParent ? (currentParent as { id?: string }).id : null;
+          if (currentParentId !== parentId) {
+            // Framer landed it somewhere else. Try a corrective setParent.
+            try {
+              await f.setParent(instanceId, parentId);
+              await assertParent(f, instanceId, parentId, "add_component_instance (after corrective setParent)");
+            } catch (e) {
+              // Leave the node in place so the caller can inspect, but raise.
+              const msg = e instanceof Error ? e.message : String(e);
+              throw new FramerToolError(
+                `Component instance ${instanceId} was created but landed under ${currentParentId ?? "null"}, and the corrective move to ${parentId} failed: ${msg}`,
+                "Verify parentId exists on the same page, then try framer_set_parent manually.",
+                "WRONG_PARENT",
+              );
+            }
+          }
+        }
+        return instance;
+      });
       return ok({ node: serializeNode(node) });
     },
   });
@@ -128,7 +159,9 @@ export function registerPageAndNodeTools(server: McpServer) {
     name: "framer_set_node_attributes",
     title: "Set node attributes",
     description:
-      "Update any editable attributes on a node (partial merge). Returns the updated node.",
+      "Update any editable attributes on a node (partial merge). Returns the updated node. " +
+      "ATTRIBUTE VALUE FORMAT: dimensions must be CSS-unit strings ('1440px', not 1440). " +
+      "Colors are hex or rgb(...) strings. This tool is the RECOMMENDED way to apply attributes that failed to persist during framer_create_frame / framer_add_component_instance (which often silently coerce or reject values at creation time).",
     inputSchema: z.object({ nodeId: NodeId, attributes: LooseAttributes }),
     annotations: idempotentMutation,
     handler: async ({ nodeId, attributes }) => {
@@ -150,7 +183,10 @@ export function registerPageAndNodeTools(server: McpServer) {
   registerTool(server, {
     name: "framer_set_text",
     title: "Set text node content",
-    description: "Set the plaintext content of a TextNode.",
+    description:
+      "Set the plaintext content of a TextNode. " +
+      "LIMITATION: only works on TextNode instances — for other node types, use framer_set_node_attributes. " +
+      "Raises WRONG_NODE_TYPE with the actual class if you pass a non-TextNode id.",
     inputSchema: z.object({ nodeId: NodeId, text: z.string() }),
     annotations: idempotentMutation,
     handler: async ({ nodeId, text }) => {
@@ -180,7 +216,8 @@ export function registerPageAndNodeTools(server: McpServer) {
     name: "framer_set_parent",
     title: "Reparent node",
     description:
-      "Move a node under a new parent, optionally inserting at a specific child index (0-based).",
+      "Move a node under a new parent, optionally inserting at a specific child index (0-based). " +
+      "Verifies the move succeeded and raises WRONG_PARENT if Framer silently no-op'd it (can happen for cross-page moves or when the target parent does not accept this node type).",
     inputSchema: z.object({
       nodeId: NodeId,
       parentId: NodeId,
@@ -188,7 +225,10 @@ export function registerPageAndNodeTools(server: McpServer) {
     }),
     annotations: idempotentMutation,
     handler: async ({ nodeId, parentId, index }) => {
-      await withFramer((f) => f.setParent(nodeId, parentId, index));
+      await withFramer(async (f) => {
+        await f.setParent(nodeId, parentId, index);
+        await assertParent(f, nodeId, parentId, "set_parent");
+      });
       return ok({ nodeId, parentId, index: index ?? null });
     },
   });
@@ -198,11 +238,12 @@ export function registerPageAndNodeTools(server: McpServer) {
     title: "Clone node",
     description:
       "Duplicate a node and return the new node's id. " +
-      "If `parentId` is provided, the clone is reparented there after creation (via setParent). " +
-      "CAVEATS: " +
-      "(1) The Framer SDK's cloneNode does not accept a destination — without `parentId`, the clone lands wherever Framer chooses (usually next to the source). " +
-      "(2) Depth of the clone is determined by the SDK; complex nested hierarchies may be shallow-cloned. Inspect with framer_get_node_children after cloning. " +
-      "(3) If `parentId` is set and the reparent fails, the orphan clone is automatically removed to preserve project state.",
+      "If `parentId` is provided, the clone is reparented there after creation (via setParent) AND the parent is verified post-move. " +
+      "LIMITATIONS: " +
+      "(1) The Framer SDK's cloneNode does not accept a destination. Without `parentId`, the clone lands wherever Framer chooses — usually next to the source, NOT on the page you expect. " +
+      "(2) Framer's setParent can silently no-op for cross-page moves. This tool now verifies `getParent(clone) === parentId` after the move and raises WRONG_PARENT if Framer rejected the move. " +
+      "(3) Clone depth is determined by the SDK. Complex nested hierarchies (especially top-level breakpoint frames like the Desktop frame of a page) are often SHALLOW-cloned — the returned node may be the correct size but contain no children. Inspect with framer_get_node_children or framer_list_descendants after cloning. " +
+      "(4) If the reparent or verification fails, the orphan clone is automatically removed so the project is not left in an unintended state.",
     inputSchema: z.object({
       nodeId: NodeId,
       parentId: NodeId.optional().describe("Optional: reparent the clone under this node after creation."),
@@ -224,22 +265,20 @@ export function registerPageAndNodeTools(server: McpServer) {
 
         try {
           await f.setParent(cloneId, parentId, index);
+          // Verify — Framer's setParent can silently no-op for cross-page moves.
+          await assertParent(f, cloneId, parentId, "clone_node");
         } catch (reparentErr) {
-          // Rollback: remove the orphan clone so we don't leave stray nodes
-          // in an unintended location.
-          try {
-            await f.removeNodes([cloneId]);
-          } catch {
-            // best-effort rollback; surface the original error either way
-          }
+          // Rollback: remove the orphan clone so we don't leave a stray node
+          // on the wrong page.
+          await bestEffortRemove(f, cloneId);
+          if (reparentErr instanceof FramerToolError) throw reparentErr;
           const msg = reparentErr instanceof Error ? reparentErr.message : String(reparentErr);
           throw new FramerToolError(
             `Clone created ${cloneId} but reparenting under ${parentId} failed and the clone was removed: ${msg}`,
-            "Verify parentId exists and accepts children of this type.",
+            "Verify parentId exists on a page that can accept this node type.",
             "CLONE_REPARENT_FAILED",
           );
         }
-        // Re-read the clone so the returned attributes reflect the new parent.
         const reread = await f.getNode(cloneId);
         return reread ?? clone;
       });
@@ -250,11 +289,17 @@ export function registerPageAndNodeTools(server: McpServer) {
   registerTool(server, {
     name: "framer_remove_node",
     title: "Remove node",
-    description: "Delete a node from the canvas. Destructive.",
+    description:
+      "Delete a node from the canvas. Destructive. " +
+      "This tool verifies removal — if Framer silently re-instantiates the node (happens for the primary breakpoint frame Framer requires on every page), it raises NODE_REINSTATIATED instead of falsely reporting success. " +
+      "LIMITATION: primary breakpoint frames (the auto-created Desktop frame on each page) cannot be deleted. Reconfigure them with framer_set_node_attributes instead.",
     inputSchema: z.object({ nodeId: NodeId }),
     annotations: destructive,
     handler: async ({ nodeId }) => {
-      await withFramer((f) => f.removeNodes([nodeId]));
+      await withFramer(async (f) => {
+        await f.removeNodes([nodeId]);
+        await assertRemoved(f, nodeId);
+      });
       return ok({ removed: nodeId });
     },
   });

@@ -12,7 +12,11 @@ export function registerVisualTools(server: McpServer) {
     name: "framer_screenshot_node",
     title: "Screenshot node",
     description:
-      "Render a node to a PNG/JPEG image and return it as inline image content. Use this after design edits to visually verify the result.",
+      "Render a node to a PNG/JPEG image and return it as inline image content. Use this after design edits to visually verify the result. " +
+      "LIMITATIONS: " +
+      "(1) Framer enforces a server-side timeout. Full-page or breakpoint-sized frames at default scale frequently time out — when they do you'll receive error code TIMEOUT. " +
+      "(2) For large nodes, reduce `scale` (try 0.5), pass a `clip` region, or screenshot child sections individually. " +
+      "(3) SCREENSHOT_TOO_LARGE is raised separately when the output exceeds Framer's size cap — same fix (lower scale or clip).",
     inputSchema: z.object({
       nodeId: NodeId,
       format: z.enum(["png", "jpeg"]).optional(),
