@@ -15,6 +15,22 @@ npm install
 npm run build
 ```
 
+## Node.js version
+
+`framer-api` uses the global `WebSocket` constructor, which is built in on
+**Node.js ≥ 22**. On Node 20 you must launch with `--experimental-websocket`.
+
+```bash
+# Node 22+
+node dist/index.js
+
+# Node 20 — flag required, else tools fail with "rr is not a constructor"
+node --experimental-websocket dist/index.js
+```
+
+The Claude Desktop config in the next section includes the flag for Node 20
+compatibility; remove it if you're on Node 22+.
+
 ## Configure
 
 The server reads a single-project configuration from environment variables:
@@ -36,8 +52,8 @@ Add to an MCP client (e.g. Claude Desktop `claude_desktop_config.json`):
 {
   "mcpServers": {
     "framer-design": {
-      "command": "node",
-      "args": ["/absolute/path/to/framer-design-mcp-server/dist/index.js"],
+      "command": "/absolute/path/to/node",
+      "args": ["--experimental-websocket", "/absolute/path/to/framer-design-mcp-server/dist/index.js"],
       "env": {
         "FRAMER_PROJECT_URL": "https://framer.com/projects/Sites--aabbccddeeff",
         "FRAMER_API_KEY": "ap_..."
