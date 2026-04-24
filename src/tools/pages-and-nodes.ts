@@ -15,32 +15,36 @@ const destructive = { readOnlyHint: false, destructiveHint: true, idempotentHint
 export function registerPageAndNodeTools(server: McpServer) {
   // ------- Pages -------
   registerTool(server, {
-    name: "framer_create_web_page",
-    title: "Create web page",
+    name: "framer_create_page",
+    title: "Create page",
     description:
-      "Create a new WebPageNode at the given path (e.g. '/about'). Path should start with '/'. " +
-      "LIMITATIONS: " +
+      "Create a new page. Set `kind` to 'web' for a routable WebPageNode (requires `pagePath`, e.g. '/about') " +
+      "or 'design' for a DesignPageNode used for non-routable working surfaces (requires `pageName`). " +
+      "LIMITATIONS (web pages only): " +
       "(1) Framer auto-inserts a default primary breakpoint frame (the Desktop frame, ~1200x1080, no layout) as a child of the new page — you cannot skip or remove it (see framer_remove_node). " +
       "(2) To customize the primary breakpoint dimensions/layout, call framer_set_node_attributes on it after creation.",
-    inputSchema: z.object({
-      pagePath: z.string().min(1).describe("URL path, e.g. '/about'."),
-    }),
+    inputSchema: z
+      .object({
+        kind: z.enum(["web", "design"]).describe("'web' → WebPageNode (routable). 'design' → DesignPageNode."),
+        pagePath: z.string().min(1).optional().describe("URL path for web pages, e.g. '/about'. Required when kind='web'."),
+        pageName: z.string().min(1).optional().describe("Display name for design pages. Required when kind='design'."),
+      })
+      .superRefine((val, ctx) => {
+        if (val.kind === "web" && !val.pagePath) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pagePath is required when kind='web'." });
+        }
+        if (val.kind === "design" && !val.pageName) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "pageName is required when kind='design'." });
+        }
+      }),
     annotations: mutation,
-    handler: async ({ pagePath }) => {
-      const page = await withFramerWrite((f) => f.createWebPage(pagePath));
-      return ok({ page: serializeNode(page) }, `Created web page at ${pagePath}`);
-    },
-  });
-
-  registerTool(server, {
-    name: "framer_create_design_page",
-    title: "Create design page",
-    description: "Create a new DesignPageNode with the given display name.",
-    inputSchema: z.object({ pageName: z.string().min(1) }),
-    annotations: mutation,
-    handler: async ({ pageName }) => {
-      const page = await withFramerWrite((f) => f.createDesignPage(pageName));
-      return ok({ page: serializeNode(page) }, `Created design page "${pageName}"`);
+    handler: async (input) => {
+      if (input.kind === "web") {
+        const page = await withFramerWrite((f) => f.createWebPage(input.pagePath!));
+        return ok({ page: serializeNode(page) }, `Created web page at ${input.pagePath}`);
+      }
+      const page = await withFramerWrite((f) => f.createDesignPage(input.pageName!));
+      return ok({ page: serializeNode(page) }, `Created design page "${input.pageName}"`);
     },
   });
 

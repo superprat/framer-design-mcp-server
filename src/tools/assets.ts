@@ -75,25 +75,38 @@ function toNamedFileAssetInput(input: ImageInput) {
 
 export function registerAssetTools(server: McpServer) {
   registerTool(server, {
-    name: "framer_upload_image",
-    title: "Upload image",
+    name: "framer_upload_asset",
+    title: "Upload asset",
     description:
-      "Upload an image to the project's asset library without inserting it onto the canvas. Returns an ImageAsset reference for use with framer_set_node_attributes.",
-    inputSchema: z.object({ image: ImageInput }),
+      "Upload an image or non-image file to the project's asset library without inserting it onto the canvas. " +
+      "Set `kind` to 'image' for images (returns an ImageAsset usable in framer_set_node_attributes) or 'file' for any other file type. " +
+      "Supply either `url` (public URL Framer can fetch) or `bytesBase64` (+ `mimeType`) — not both.",
+    inputSchema: z.object({
+      kind: z
+        .enum(["image", "file"])
+        .describe("'image' uses Framer's image pipeline (returns ImageAsset). 'file' is for any other asset."),
+      asset: ImageInput,
+    }),
     annotations: mutation,
-    handler: async ({ image }) => {
-      const asset = await withFramerWrite((f) =>
+    handler: async ({ kind, asset }) => {
+      const uploaded = await withFramerWrite<unknown>((f) => {
+        if (kind === "image") {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return f.uploadImage(toNamedImageAssetInput(asset) as any);
+        }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        f.uploadImage(toNamedImageAssetInput(image) as any),
-      );
-      return ok({ asset: asset as unknown as Record<string, unknown> });
+        return f.uploadFile(toNamedFileAssetInput(asset) as any);
+      });
+      return ok({ kind, asset: uploaded as unknown as Record<string, unknown> });
     },
   });
 
   registerTool(server, {
     name: "framer_add_image",
     title: "Add image to canvas",
-    description: "Upload and insert an image onto the canvas in one step.",
+    description:
+      "Upload and insert an image onto the canvas in one step. " +
+      "Use framer_upload_asset with kind='image' instead if you only need the asset reference (no placement).",
     inputSchema: z.object({ image: ImageInput }),
     annotations: mutation,
     handler: async ({ image }) => {
@@ -102,21 +115,6 @@ export function registerAssetTools(server: McpServer) {
         f.addImage(toNamedImageAssetInput(image) as any),
       );
       return ok({ added: true });
-    },
-  });
-
-  registerTool(server, {
-    name: "framer_upload_file",
-    title: "Upload file",
-    description: "Upload a file asset (non-image) to the project.",
-    inputSchema: z.object({ file: ImageInput }),
-    annotations: mutation,
-    handler: async ({ file }) => {
-      const asset = await withFramerWrite((f) =>
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        f.uploadFile(toNamedFileAssetInput(file) as any),
-      );
-      return ok({ asset: asset as unknown as Record<string, unknown> });
     },
   });
 }

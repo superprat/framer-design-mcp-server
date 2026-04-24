@@ -71,15 +71,15 @@ FRAMER_PROJECT_URL=... FRAMER_API_KEY=... npm run inspect
 
 ## Tool catalogue
 
-27 tools prefixed `framer_`. All open a fresh Framer connection per call (via
+35 tools prefixed `framer_`. All open a fresh Framer connection per call (via
 `withConnection`), retry transient SDK errors, and return structured JSON.
 
 | Group | Tools |
 |---|---|
-| Inspection (read-only) | `get_project_info`, `get_current_user`, `get_canvas_root`, `list_pages`, `get_node`, `get_node_children`, `get_node_parent`, `get_node_rect`, `find_nodes_by_type`, `find_nodes_by_attribute` |
-| Pages | `create_web_page`, `create_design_page` |
+| Inspection (read-only) | `get_project_info`, `get_current_user`, `get_canvas_root`, `list_pages`, `get_node`, `get_node_children`, `list_descendants`, `get_node_parent`, `get_node_rect`, `find_nodes_by_type`, `find_nodes_by_attribute`, `find_nodes_by_name` |
+| Pages | `create_page` (kind: `web` \| `design`) |
 | Nodes | `create_frame`, `create_text_node`, `create_component_node`, `add_component_instance`, `set_node_attributes`, `set_text`, `set_parent`, `clone_node`, `remove_node`, `add_svg` |
-| Assets | `upload_image`, `add_image`, `upload_file` |
+| Assets | `upload_asset` (kind: `image` \| `file`), `add_image` |
 | Styles | `list_color_styles`, `create_color_style`, `list_text_styles`, `create_text_style`, `list_fonts` |
 | Code | `list_code_files`, `get_code_file`, `create_code_file`, `typecheck_code` |
 | Visual | `screenshot_node`, `export_svg` |
