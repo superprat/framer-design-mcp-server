@@ -4,9 +4,10 @@ An MCP server that lets an LLM **design web pages in a Framer project** via the
 [Framer Server API](https://www.framer.com/developers/server-api-introduction)
 (currently in open beta).
 
-Scoped to page-design operations — create pages, frames, text, components,
-styles, and code files; screenshot the result. **CMS and publishing workflows
-are intentionally excluded** (see "Out of scope" below).
+Scoped to page-design and CMS operations — create pages, frames, text,
+components, styles, and code files; read and update CMS collections and items;
+screenshot the result. **Publishing workflows are intentionally excluded** (see
+"Out of scope" below).
 
 ## Install
 
@@ -71,7 +72,7 @@ FRAMER_PROJECT_URL=... FRAMER_API_KEY=... npm run inspect
 
 ## Tool catalogue
 
-35 tools prefixed `framer_`. All open a fresh Framer connection per call (via
+44 tools prefixed `framer_`. All open a fresh Framer connection per call (via
 `withConnection`), retry transient SDK errors, and return structured JSON.
 
 | Group | Tools |
@@ -82,6 +83,7 @@ FRAMER_PROJECT_URL=... FRAMER_API_KEY=... npm run inspect
 | Assets | `upload_asset` (kind: `image` \| `file`), `add_image` |
 | Styles | `list_color_styles`, `create_color_style`, `list_text_styles`, `create_text_style`, `list_fonts` |
 | Code | `list_code_files`, `get_code_file`, `create_code_file`, `typecheck_code` |
+| CMS | `list_collections`, `get_collection`, `list_collection_items`, `get_collection_item`, `create_collection`, `update_collection_fields` (mode: `add` \| `remove` \| `setOrder`), `upsert_collection_items`, `remove_collection_items`, `set_collection_item_order` |
 | Visual | `screenshot_node`, `export_svg` |
 
 ### Design-feedback loop
@@ -94,12 +96,13 @@ continuing.
 
 These Framer Server API surfaces are **not** exposed by this server:
 
-- CMS — `getCollections`, `addItems`, `createCollection`, field management
 - Publishing — `publish`, `deploy`, `getChangedPaths`, `getChangeContributors`
 - Redirects, localization
+- ManagedCollection writes (CMS collections owned by other plugins are read-only at the SDK level)
+- Per-field schema updates (`Field.setAttributes`) — the CMS surface covers add/remove/reorder fields only
 
-If you need them, a separate `tools/cms.ts` / `tools/publishing.ts` module can
-be added; all would share the existing `withFramer` wrapper.
+If you need them, a separate `tools/publishing.ts` module can be added; it
+would share the existing `withFramer` wrapper.
 
 ## Evaluation
 

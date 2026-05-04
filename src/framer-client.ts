@@ -135,6 +135,10 @@ const HINTS: Record<string, string> = {
   SCREENSHOT_TOO_LARGE: "Lower the scale (e.g. 1 instead of 2) or supply a smaller clip region.",
   INTERNAL: "Framer returned an internal error. Retry; if it persists, report to server-api-feedback@framer.com.",
   CONNECTION_CLOSED: "The connection was dropped. Retry the tool.",
+  COLLECTION_NOT_FOUND:
+    "The collection id does not exist in this project. Use framer_list_collections to discover ids.",
+  ITEM_NOT_FOUND:
+    "The item id does not exist in this collection. List items via framer_list_collection_items.",
 };
 
 function hintForErrorCode(code: string | undefined): string | undefined {

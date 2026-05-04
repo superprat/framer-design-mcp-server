@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerAssetTools } from "./tools/assets.js";
+import { registerCmsTools } from "./tools/cms.js";
 import { registerCodeTools } from "./tools/code.js";
 import { registerInspectionTools } from "./tools/inspection.js";
 import { registerPageAndNodeTools } from "./tools/pages-and-nodes.js";
@@ -19,6 +20,7 @@ async function main() {
   registerAssetTools(server);
   registerStyleTools(server);
   registerCodeTools(server);
+  registerCmsTools(server);
   registerVisualTools(server);
 
   const transport = new StdioServerTransport();
